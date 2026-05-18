@@ -1,4 +1,7 @@
-# LIMBO
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/4ad1f0e8-c629-4294-9c2b-326d533984d6" alt="limbo" width="300" />
+</p>
+
 ### Your Move contract won't leave the same.
 
 ![limbo_sui](https://img.shields.io/badge/limbo__sui-v0.1.0-red)
