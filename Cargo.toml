@@ -1,0 +1,44 @@
+[package]
+name = "limbo_sui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Astrophel"]
+description = "Your Move contract won't leave the same."
+
+[[bin]]
+name = "limbo_sui"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (for Gemini API + git clone fallback)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Colors + terminal output
+colored = "2"
+indicatif = "0.17"
+
+# Date/time for report
+chrono = "0.4"
+
+# Regex for pattern matching (Layer 3)
+regex = "1"
+
+# Git clone
+git2 = "0.19"
+
+# Error handling
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+strip = true
