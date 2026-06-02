@@ -1,4 +1,4 @@
-use crate::types::{AuditResult, FindingStatus, Severity};
+use crate::types::{AuditResult, Severity};
 use anyhow::Result;
 use chrono::Utc;
 use colored::*;

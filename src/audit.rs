@@ -1,8 +1,6 @@
 use crate::{classifier, git, layer1, layer2, layer3, layer4, report};
 use crate::types::{AuditResult, Finding, FindingStatus};
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::time::Duration;
 
 pub async fn run(target: String, output: String) {
     println!("  {} Target: {}", "→".cyan(), target.white().bold());
@@ -136,7 +134,7 @@ pub async fn run(target: String, output: String) {
 }
 
 fn calculate_risk_score(findings: &[Finding]) -> u32 {
-    use crate::types::Severity;
+    
 
     let raw: u32 = findings
         .iter()

@@ -1,8 +1,7 @@
-use crate::types::{AuditResult, Finding, FindingStatus};
+use crate::types::{AuditResult, Finding};
 use anyhow::{Context, Result};
 use colored::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Serialize, Deserialize)]
 struct GeminiRequest {
@@ -66,7 +65,7 @@ pub async fn generate_report(result: &AuditResult) -> Result<String> {
         .post(&url)
         .header("Content-Type", "application/json")
         .json(&request_body)
-        .send()
+        .timeout(std::time::Duration::from_secs(30)).send()
         .await
         .context("Failed to reach Gemini API")?;
 

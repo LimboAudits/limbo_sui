@@ -163,6 +163,7 @@ fn classify_test_failure(message: &str) -> (Severity, String) {
 }
 
 /// Returns findings that couldn't be classified — to be sent to AI
+#[allow(dead_code)]
 pub fn get_unknown_errors(layer1: &Layer1Result) -> Vec<String> {
     layer1
         .errors

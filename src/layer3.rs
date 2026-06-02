@@ -2,7 +2,7 @@ use crate::types::{Finding, FindingStatus, Layer1Result, Layer2Result, Layer3Res
 use colored::*;
 use regex::Regex;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 struct Pattern {
     name: &'static str,
