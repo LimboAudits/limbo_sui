@@ -111,7 +111,7 @@ fn collect_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
             if path.is_dir() {
                 // Skip hidden dirs and build artifacts
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if !name.starts_with('.') && name != "build" && name != "target" {
+                if !name.starts_with('.') && name != "build" && name != "target" && name != "node_modules" && name != ".git" {
                     collect_recursive(&path, files);
                 }
             } else if path.extension().map_or(false, |e| e == "move") {

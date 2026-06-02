@@ -49,7 +49,7 @@ pub fn run(
                     status: if is_confirmed {
                         FindingStatus::Confirmed
                     } else {
-                        FindingStatus::SingleTool
+                        FindingStatus::HighConfidence
                     },
                     file: file_path.to_string_lossy().to_string(),
                     line: Some(line_num),

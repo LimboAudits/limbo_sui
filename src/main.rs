@@ -10,6 +10,7 @@ mod types;
 
 use clap::{Parser, Subcommand};
 use colored::*;
+use dotenv::dotenv;
 
 #[derive(Parser)]
 #[command(
@@ -38,6 +39,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
     print_banner();
 
     let cli = Cli::parse();

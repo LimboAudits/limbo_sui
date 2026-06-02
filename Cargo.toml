@@ -38,6 +38,7 @@ git2 = "0.19"
 
 # Error handling
 anyhow = "1"
+dotenv = "0.15"
 
 [profile.release]
 opt-level = 3

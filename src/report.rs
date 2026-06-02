@@ -77,7 +77,7 @@ fn build_report(result: &AuditResult, ai_content: &str) -> String {
 ---
 
 *Your contract has been to Limbo.*  
-*Powered by [Limbo](https://github.com/astrophel/limbo_sui) — Astrophel*  
+*Powered by [Limbo](https://github.com/LimboAudits/limbo_sui) — Astrophel*  
 *CONFIDENTIAL — Limbo Security Audit*
 "#,
         contract_name = result.contract_name,

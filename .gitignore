@@ -1,15 +1,25 @@
-.env
+# Rust build artifacts
 target/
-bin/sui
-*.key
+Cargo.lock
+
+# Environment
+.env
+*.env
+
+# Sui binaries
 bin/
-sui-latest-linux.tgz
-sui-fork
-sui-node
-sui-faucet
-sui-debug
-sui-bridge
-sui-bridge-cli
-sui-tool
-move-analyzer
 *.tgz
+
+# Move build artifacts
+demo/build/
+demo/Move.lock
+**/build/
+**/*.mv
+**/*.mvd
+
+# Generated reports
+limbo.report.*.md
+
+# Misc
+*.log
+.DS_Store

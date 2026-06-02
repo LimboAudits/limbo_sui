@@ -169,3 +169,27 @@ pub fn classify_error_string(msg: &str) -> String {
         "Unknown".to_string()
     }
 }
+
+pub fn find_move_packages(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut packages = Vec::new();
+    find_packages_recursive(dir, &mut packages);
+    packages
+}
+
+fn find_packages_recursive(dir: &std::path::Path, packages: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if !name.starts_with('.') && name != "build" && name != "target" {
+                    // Check if this dir has Move.toml
+                    if path.join("Move.toml").exists() {
+                        packages.push(path.clone());
+                    }
+                    find_packages_recursive(&path, packages);
+                }
+            }
+        }
+    }
+}

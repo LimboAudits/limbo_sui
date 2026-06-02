@@ -10,15 +10,15 @@ module demo::vulnerable_vault {
     use sui::balance::{Self, Balance};
 
     /// The vault object holding funds
-    struct Vault has key {
+    public struct Vault has key {
         id: UID,
         balance: Balance<SUI>,
         owner: address,
-        total_deposited: u64,  // VULN: unchecked accumulator
+        total_deposited: u64,
     }
 
     /// Admin capability — VULN: returned from public function
-    struct AdminCap has key, store {
+    public struct AdminCap has key, store {
         id: UID,
     }
 
@@ -29,24 +29,23 @@ module demo::vulnerable_vault {
     }
 
     /// VULNERABILITY 1: Missing access control
-    /// Anyone can call this — no signer or capability check
-    public entry fun create_vault(ctx: &mut TxContext) {
+    /// Anyone can call this — no capability check
+    public fun create_vault(ctx: &mut TxContext) {
         let vault = Vault {
             id: object::new(ctx),
             balance: balance::zero(),
             owner: tx_context::sender(ctx),
             total_deposited: 0,
         };
-        // VULN: transfers to sender but anyone can create vaults
         transfer::transfer(vault, tx_context::sender(ctx));
     }
 
     /// VULNERABILITY 2: Integer overflow
     /// total_deposited can overflow with large amounts
-    public entry fun deposit(
+    public fun deposit(
         vault: &mut Vault,
         payment: Coin<SUI>,
-        ctx: &mut TxContext
+        _ctx: &mut TxContext
     ) {
         let amount = coin::value(&payment);
         // VULN: unchecked addition — overflows at u64::MAX
@@ -56,7 +55,7 @@ module demo::vulnerable_vault {
 
     /// VULNERABILITY 3: Unchecked ownership on transfer
     /// No check that caller owns the vault
-    public entry fun withdraw_all(
+    public fun withdraw_all(
         vault: Vault,
         ctx: &mut TxContext
     ) {
@@ -68,25 +67,24 @@ module demo::vulnerable_vault {
     }
 
     /// VULNERABILITY 4: Capability leakage
-    /// Returns AdminCap from a public function — anyone can get admin
+    /// Returns AdminCap from a public function
     public fun get_admin_cap(ctx: &mut TxContext): AdminCap {
         AdminCap { id: object::new(ctx) }
     }
 
     /// VULNERABILITY 5: Missing abort on invalid state
-    /// Should abort if amount > balance but silently continues
-    public entry fun withdraw_partial(
+    public fun withdraw_partial(
         vault: &mut Vault,
         amount: u64,
         ctx: &mut TxContext
     ) {
-        // VULN: no assert!(amount <= balance::value(&vault.balance))
+        // VULN: no assert!(amount <= balance)
         // VULN: no check that sender == vault.owner
         if (amount <= balance::value(&vault.balance)) {
             let withdrawn = balance::split(&mut vault.balance, amount);
             let coin = coin::from_balance(withdrawn, ctx);
             transfer::public_transfer(coin, tx_context::sender(ctx));
         }
-        // Silently does nothing if amount > balance — no abort
+        // Silently does nothing if amount > balance
     }
 }
