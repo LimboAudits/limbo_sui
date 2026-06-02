@@ -172,3 +172,11 @@ pub fn get_unknown_errors(layer1: &Layer1Result) -> Vec<String> {
         .map(|e| e.message.clone())
         .collect()
 }
+
+pub fn is_framework_error(message: &str) -> bool {
+    message.contains("UNEXPECTED_VERIFIER_ERROR")
+        || message.contains("INTERNAL VM INVARIANT")
+        || message.contains("version mismatch")
+        || message.contains("not our ref")
+        || message.contains("upload-pack")
+}
