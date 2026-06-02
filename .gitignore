@@ -9,6 +9,15 @@ Cargo.lock
 # Sui binaries
 bin/
 *.tgz
+sui
+sui-fork
+sui-node
+sui-faucet
+sui-debug
+sui-bridge
+sui-bridge-cli
+sui-tool
+move-analyzer
 
 # Move build artifacts
 demo/build/
