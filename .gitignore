@@ -1,0 +1,15 @@
+.env
+target/
+bin/sui
+*.key
+bin/
+sui-latest-linux.tgz
+sui-fork
+sui-node
+sui-faucet
+sui-debug
+sui-bridge
+sui-bridge-cli
+sui-tool
+move-analyzer
+*.tgz
