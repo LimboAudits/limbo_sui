@@ -173,6 +173,7 @@ pub fn get_unknown_errors(layer1: &Layer1Result) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn is_framework_error(message: &str) -> bool {
     message.contains("UNEXPECTED_VERIFIER_ERROR")
         || message.contains("INTERNAL VM INVARIANT")

@@ -1,14 +1,13 @@
 use crate::types::{Finding, FindingStatus, Layer1Result, Layer2Result, Layer3Result, Severity};
 use colored::*;
-use regex::Regex;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 struct Pattern {
     name: &'static str,
     severity: Severity,
     description: &'static str,
-    check: fn(&str, &str) -> Option<(u32, String)>,
+    check: fn(&str, &Path) -> Vec<(u32, String)>,
 }
 
 pub fn run(
@@ -28,16 +27,11 @@ pub fn run(
             Err(_) => continue,
         };
 
-        let file_name = file_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
         for pattern in &patterns {
-            if let Some((line_num, detail)) = (pattern.check)(&source, &file_name) {
+            let hits = (pattern.check)(&source, file_path);
+            for (line_num, detail) in hits {
                 let is_confirmed = is_confirmed_by_layers(
-                    &file_name,
+                    &file_path.to_string_lossy(),
                     pattern.name,
                     layer1,
                     layer2,
@@ -67,6 +61,10 @@ pub fn run(
         }
     }
 
+    // Deduplicate by title + file + line
+    confirmed.dedup_by(|a, b| a.title == b.title && a.file == b.file && a.line == b.line);
+    potential.dedup_by(|a, b| a.title == b.title && a.file == b.file && a.line == b.line);
+
     println!(
         "  {} Pattern scan: {} confirmed, {} potential",
         "✓".green(),
@@ -82,128 +80,149 @@ fn get_patterns() -> Vec<Pattern> {
         Pattern {
             name: "Integer Overflow Risk",
             severity: Severity::High,
-            description: "Unchecked arithmetic on integer types can overflow, allowing attackers to manipulate balances or bypass logic. Move does not have SafeMath by default.",
+            description: "Unchecked arithmetic on integer types can overflow, allowing attackers to manipulate balances or bypass logic.",
             check: check_integer_overflow,
         },
         Pattern {
             name: "Missing Access Control",
             severity: Severity::Critical,
-            description: "Public entry functions without signer parameter allow anyone to call privileged operations. This can lead to unauthorized state changes or fund theft.",
+            description: "Public functions without proper authorization checks allow anyone to call privileged operations.",
             check: check_missing_access_control,
         },
         Pattern {
             name: "Capability Leakage",
             severity: Severity::High,
-            description: "Capability objects exposed in public return values or stored in public fields can be acquired by unauthorized parties, granting them elevated privileges.",
+            description: "Capability objects exposed in public return values can be acquired by unauthorized parties.",
             check: check_capability_leakage,
         },
         Pattern {
             name: "Unchecked Object Ownership",
             severity: Severity::High,
-            description: "Calling transfer::transfer without verifying object ownership allows transfer of objects the caller does not own, leading to theft.",
+            description: "Calling transfer without verifying object ownership allows transfer of objects the caller does not own.",
             check: check_unchecked_ownership,
-        },
-        Pattern {
-            name: "Unsafe Public Transfer",
-            severity: Severity::Medium,
-            description: "transfer::public_transfer on objects without proper ownership validation may expose assets to unauthorized parties.",
-            check: check_public_transfer,
         },
         Pattern {
             name: "Missing Abort on Error",
             severity: Severity::Medium,
-            description: "Functions that should fail under certain conditions but do not abort allow execution to continue in invalid states.",
+            description: "Functions with conditional logic but no abort/assert allow execution in invalid states.",
             check: check_missing_abort,
         },
     ]
 }
 
-// ─── Pattern Checks ────────────────────────────────────────────────────────
+// ─── Pattern Checks ─────────────────────────────────────────────────────────
 
-fn check_integer_overflow(source: &str, _file: &str) -> Option<(u32, String)> {
-    // Look for arithmetic without overflow checks
-    // Patterns: u64/u128 variables with +, -, * operations
-    // that are NOT wrapped in assert! or checked_add etc.
-    let re = Regex::new(r"(let\s+\w+\s*:\s*u(?:64|128|32|16|8)\s*=.*?[+\-\*].*?;)").unwrap();
+fn check_integer_overflow(source: &str, _file: &Path) -> Vec<(u32, String)> {
+    let mut hits = Vec::new();
 
     for (line_num, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+
         // Skip comments
-        if line.trim().starts_with("//") {
+        if trimmed.starts_with("//") || trimmed.starts_with("*") {
             continue;
         }
 
-        // Check for arithmetic operations on integer types
-        if (line.contains("u64") || line.contains("u128") || line.contains("u32"))
-            && (line.contains(" + ") || line.contains(" - ") || line.contains(" * "))
-            && !line.contains("assert!")
-            && !line.contains("checked_")
-            && !line.contains("overflow")
-        {
-            // Make sure it's in a function body (has assignment or expression)
-            if line.contains("=") || line.contains("(") {
-                return Some((
+        // Look for arithmetic on integer types without checks
+        let has_int_type = trimmed.contains("u64")
+            || trimmed.contains("u128")
+            || trimmed.contains("u32")
+            || trimmed.contains("u8")
+            || trimmed.contains("u16");
+
+        let has_arithmetic = trimmed.contains(" + ")
+            || trimmed.contains(" - ")
+            || trimmed.contains(" * ")
+            || trimmed.contains("+=")
+            || trimmed.contains("-=")
+            || trimmed.contains("*=");
+
+        let has_check = trimmed.contains("assert!")
+            || trimmed.contains("checked_")
+            || trimmed.contains("overflow")
+            || trimmed.contains("/ 10_000") // royalty calc pattern is intentional
+            || trimmed.contains("as u128"); // casting up is safe
+
+        if has_arithmetic && !has_check {
+            // Check surrounding context for integer type declarations
+            let context = get_surrounding_lines(source, line_num, 10);
+            if context.contains("u64")
+                || context.contains("u128")
+                || context.contains("u32")
+                || has_int_type
+            {
+                hits.push((
                     (line_num + 1) as u32,
-                    format!(
-                        "Arithmetic operation on integer type without overflow check: `{}`",
-                        line.trim()
-                    ),
+                    format!("Unchecked arithmetic operation: `{}`", trimmed),
                 ));
             }
-        }
-
-        // Also check for direct arithmetic in function calls
-        if re.is_match(line) && !line.contains("assert!") {
-            return Some((
-                (line_num + 1) as u32,
-                format!("Potentially unsafe integer arithmetic: `{}`", line.trim()),
-            ));
         }
     }
-    None
+
+    // Only return first hit per function to avoid noise
+    hits.truncate(3);
+    hits
 }
 
-fn check_missing_access_control(source: &str, _file: &str) -> Option<(u32, String)> {
-    // public entry fun without &signer or &mut TxContext parameter
-    // Note: In Sui Move, access control uses TxContext + sender checks
-    // or Capability objects — no signer like Aptos Move
-    let entry_re = Regex::new(r"public\s+entry\s+fun\s+(\w+)\s*\(([^)]*)\)").unwrap();
+fn check_missing_access_control(source: &str, _file: &Path) -> Vec<(u32, String)> {
+    let mut hits = Vec::new();
 
     for (line_num, line) in source.lines().enumerate() {
-        if line.trim().starts_with("//") {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") {
             continue;
         }
 
-        if let Some(caps) = entry_re.captures(line) {
-            let fn_name = caps.get(1).map_or("", |m| m.as_str());
-            let params = caps.get(2).map_or("", |m| m.as_str());
-
-            // Check if it has ctx: &mut TxContext (standard Sui pattern)
-            // or a capability parameter
-            if !params.contains("TxContext")
-                && !params.contains("Cap")
-                && !params.contains("AdminCap")
-                && !params.contains("capability")
-            {
-                return Some((
-                    (line_num + 1) as u32,
-                    format!(
-                        "public entry fun `{}` has no TxContext or Capability parameter — anyone can call this",
-                        fn_name
-                    ),
-                ));
+        // Match public fun without capability or TxContext sender check
+        if (trimmed.contains("public fun ") || trimmed.contains("public entry fun "))
+            && trimmed.contains("(")
+            && !trimmed.contains("//")
+        {
+            // Skip init functions — they're safe
+            if trimmed.contains("fun init(") {
+                continue;
             }
 
-            // Has TxContext but no sender check in function body — check nearby lines
-            if params.contains("TxContext") {
-                let fn_body = get_function_body(source, line_num);
-                if !fn_body.contains("tx_context::sender")
-                    && !fn_body.contains("assert!")
-                    && fn_body.contains("transfer")
+            let params = extract_params(trimmed);
+            let fn_name = extract_fn_name(trimmed);
+
+            // No TxContext AND no capability parameter
+            if !params.contains("TxContext")
+                && !params.contains("Cap")
+                && !params.contains("Admin")
+                && !params.contains("Auth")
+            {
+                // Check if function body has transfer or state mutation
+                let body = get_function_body(source, line_num);
+                if body.contains("transfer")
+                    || body.contains("balance")
+                    || body.contains("coin")
+                    || body.contains("emit")
                 {
-                    return Some((
+                    hits.push((
                         (line_num + 1) as u32,
                         format!(
-                            "public entry fun `{}` uses transfer but never checks tx_context::sender — missing authorization",
+                            "public fun `{}` has no access control and performs state changes",
+                            fn_name
+                        ),
+                    ));
+                }
+            }
+
+            // Has TxContext but never checks sender
+            if params.contains("TxContext") {
+                let body = get_function_body(source, line_num);
+                if !body.contains("sender")
+                    && !body.contains("assert!")
+                    && !body.contains("Cap")
+                    && (body.contains("transfer::transfer")
+                        || body.contains("transfer::public_transfer"))
+                {
+                    hits.push((
+                        (line_num + 1) as u32,
+                        format!(
+                            "public fun `{}` transfers assets but never checks sender identity",
                             fn_name
                         ),
                     ));
@@ -211,128 +230,150 @@ fn check_missing_access_control(source: &str, _file: &str) -> Option<(u32, Strin
             }
         }
     }
-    None
+
+    hits
 }
 
-fn check_capability_leakage(source: &str, _file: &str) -> Option<(u32, String)> {
-    // Look for capability types returned from public functions
-    // Pattern: public fun ... : SomeCap
-    let re = Regex::new(r"public\s+fun\s+(\w+)[^{]*\)\s*:\s*(\w*[Cc]ap\w*)").unwrap();
+fn check_capability_leakage(source: &str, _file: &Path) -> Vec<(u32, String)> {
+    let mut hits = Vec::new();
 
     for (line_num, line) in source.lines().enumerate() {
-        if line.trim().starts_with("//") {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") {
             continue;
         }
 
-        if let Some(caps) = re.captures(line) {
-            let fn_name = caps.get(1).map_or("", |m| m.as_str());
-            let cap_type = caps.get(2).map_or("", |m| m.as_str());
-
-            return Some((
-                (line_num + 1) as u32,
-                format!(
-                    "public fun `{}` returns capability type `{}` — capability may be leaked to unauthorized callers",
-                    fn_name, cap_type
-                ),
-            ));
-        }
-    }
-    None
-}
-
-fn check_unchecked_ownership(source: &str, _file: &str) -> Option<(u32, String)> {
-    // transfer::transfer called without ownership validation
-    for (line_num, line) in source.lines().enumerate() {
-        if line.trim().starts_with("//") {
-            continue;
-        }
-
-        if (line.contains("transfer::transfer") || line.contains("transfer("))
-            && !line.contains("assert!")
+        // public fun that RETURNS a Cap type
+        if trimmed.contains("public fun ")
+            && trimmed.contains(")")
+            && trimmed.contains(":")
         {
-            // Check if the surrounding context has any ownership check
-            let context = get_surrounding_lines(source, line_num, 5);
-            if !context.contains("tx_context::sender")
-                && !context.contains("assert!")
-                && !context.contains("owner")
+            let after_paren = trimmed.split(')').last().unwrap_or("");
+            if after_paren.contains("Cap")
+                || after_paren.contains("Admin")
+                || after_paren.contains("Auth")
+                || after_paren.contains("Witness")
             {
-                return Some((
+                let fn_name = extract_fn_name(trimmed);
+                hits.push((
                     (line_num + 1) as u32,
                     format!(
-                        "transfer call without ownership validation: `{}`",
-                        line.trim()
-                    ),
-                ));
-            }
-        }
-    }
-    None
-}
-
-fn check_public_transfer(source: &str, _file: &str) -> Option<(u32, String)> {
-    for (line_num, line) in source.lines().enumerate() {
-        if line.trim().starts_with("//") {
-            continue;
-        }
-
-        if line.contains("transfer::public_transfer") {
-            let context = get_surrounding_lines(source, line_num, 3);
-            if !context.contains("assert!") && !context.contains("sender") {
-                return Some((
-                    (line_num + 1) as u32,
-                    format!(
-                        "public_transfer without sender validation: `{}`",
-                        line.trim()
-                    ),
-                ));
-            }
-        }
-    }
-    None
-}
-
-fn check_missing_abort(source: &str, _file: &str) -> Option<(u32, String)> {
-    // Functions with if conditions but no abort/assert in critical paths
-    // This is a heuristic — look for if without else + abort in entry functions
-    let entry_re = Regex::new(r"entry\s+fun\s+(\w+)").unwrap();
-
-    for (line_num, line) in source.lines().enumerate() {
-        if line.trim().starts_with("//") {
-            continue;
-        }
-
-        if entry_re.is_match(line) {
-            let body = get_function_body(source, line_num);
-            // Has conditional logic but no error handling
-            if body.contains("if (")
-                && !body.contains("assert!")
-                && !body.contains("abort")
-                && body.len() > 100
-            {
-                let fn_name = entry_re
-                    .captures(line)
-                    .and_then(|c| c.get(1))
-                    .map_or("unknown", |m| m.as_str());
-
-                return Some((
-                    (line_num + 1) as u32,
-                    format!(
-                        "entry fun `{}` has conditional logic but no assert!/abort — invalid states may not be caught",
+                        "public fun `{}` returns a capability type — any caller can obtain elevated privileges",
                         fn_name
                     ),
                 ));
             }
         }
     }
-    None
+
+    hits
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+fn check_unchecked_ownership(source: &str, _file: &Path) -> Vec<(u32, String)> {
+    let mut hits = Vec::new();
+
+    for (line_num, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        if trimmed.contains("transfer::transfer(")
+            || trimmed.contains("transfer::public_transfer(")
+        {
+            // Check surrounding context for ownership validation
+            let context = get_surrounding_lines(source, line_num, 8);
+
+            let has_ownership_check = context.contains("sender")
+                && (context.contains("assert!")
+                    || context.contains("==")
+                    || context.contains("owner"));
+
+            // Skip init() — safe pattern
+            let in_init = get_surrounding_lines(source, line_num, 15).contains("fun init(");
+
+            if !has_ownership_check && !in_init {
+                hits.push((
+                    (line_num + 1) as u32,
+                    format!(
+                        "Transfer without ownership validation: `{}`",
+                        trimmed
+                    ),
+                ));
+            }
+        }
+    }
+
+    hits
+}
+
+fn check_missing_abort(source: &str, _file: &Path) -> Vec<(u32, String)> {
+    let mut hits = Vec::new();
+
+    for (line_num, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        // Public functions with if but no abort/assert
+        if (trimmed.contains("public fun ") || trimmed.contains("public entry fun "))
+            && !trimmed.contains("fun init(")
+        {
+            let body = get_function_body(source, line_num);
+            let fn_name = extract_fn_name(trimmed);
+
+            if body.contains("if (")
+                && !body.contains("assert!")
+                && !body.contains("abort")
+                && body.len() > 80
+                && (body.contains("transfer") || body.contains("balance") || body.contains("coin"))
+            {
+                hits.push((
+                    (line_num + 1) as u32,
+                    format!(
+                        "public fun `{}` has conditional logic with no abort/assert — invalid states not caught",
+                        fn_name
+                    ),
+                ));
+            }
+        }
+    }
+
+    hits
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn extract_fn_name(line: &str) -> String {
+    // Extract name from "public fun name(" or "public entry fun name("
+    let after_fun = if let Some(pos) = line.find("fun ") {
+        &line[pos + 4..]
+    } else {
+        return "unknown".to_string();
+    };
+
+    after_fun
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+fn extract_params(line: &str) -> String {
+    if let (Some(start), Some(end)) = (line.find('('), line.find(')')) {
+        line[start + 1..end].to_string()
+    } else {
+        String::new()
+    }
+}
 
 fn get_function_body(source: &str, start_line: usize) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let mut body = String::new();
-    let mut depth = 0;
+    let mut depth = 0i32;
     let mut started = false;
 
     for line in lines.iter().skip(start_line) {
@@ -350,8 +391,7 @@ fn get_function_body(source: &str, start_line: usize) -> String {
         if started && depth == 0 {
             break;
         }
-        // Don't go further than 100 lines
-        if body.lines().count() > 100 {
+        if body.lines().count() > 80 {
             break;
         }
     }
@@ -366,30 +406,33 @@ fn get_surrounding_lines(source: &str, center: usize, radius: usize) -> String {
 }
 
 fn is_confirmed_by_layers(
-    file_name: &str,
+    file_path: &str,
     pattern_name: &str,
     layer1: &Layer1Result,
     layer2: &Layer2Result,
 ) -> bool {
-    // Check if Layer 1 or Layer 2 also flagged something in the same file
+    let file_name = std::path::Path::new(file_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
     let l1_hit = layer1.errors.iter().any(|e| {
-        e.file.contains(file_name)
-            || classify_pattern_match(pattern_name, &e.error_type)
+        e.file.contains(&file_name) || classify_pattern_match(pattern_name, &e.error_type)
     });
 
     let l2_hit = layer2.failures.iter().any(|f| {
-        f.message.to_lowercase().contains(&pattern_name.to_lowercase())
-            || f.module.contains(file_name.trim_end_matches(".move"))
+        f.module.contains(file_name.trim_end_matches(".move"))
     });
 
     l1_hit || l2_hit
 }
 
 fn classify_pattern_match(pattern: &str, error_type: &str) -> bool {
-    match (pattern, error_type.as_ref()) {
-        ("Integer Overflow Risk", "IntegerOverflow") => true,
-        ("Missing Access Control", "AccessControl") => true,
-        ("Capability Leakage", "CapabilityLeak") => true,
-        _ => false,
-    }
+    matches!(
+        (pattern, error_type),
+        ("Integer Overflow Risk", "IntegerOverflow")
+            | ("Missing Access Control", "AccessControl")
+            | ("Capability Leakage", "CapabilityLeak")
+    )
 }
