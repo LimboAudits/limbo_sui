@@ -168,12 +168,6 @@ limbo_sui/
 
 ---
 
-## License
-
-MIT — see [LICENSE](https://github.com/LimboAudits/limbo_sui/tree/main?tab=MIT-1-ov-file)
-
----
-
 <p align="center">
   <em>Your contract has been to Limbo.</em><br/>
   Powered by Limbo — Astrophel<br/>
