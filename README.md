@@ -170,7 +170,7 @@ limbo_sui/
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](https://github.com/LimboAudits/limbo_sui/tree/main?tab=MIT-1-ov-file)
 
 ---
 
