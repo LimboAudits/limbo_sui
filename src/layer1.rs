@@ -1,212 +1,219 @@
-use crate::types::{BuildError, Layer1Result};
-use anyhow::Result;
+/// Layer 1: RECON ENGINE
+/// Maps the entire codebase structure
+/// Finds: entry points, capabilities, math ops, transfer calls
+/// Feeds candidates to Layer 3 pattern scanner
+
+use crate::types::{EntryPoint, MathOp, ReconResult, TransferCall};
 use colored::*;
+use regex::Regex;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-pub fn run(project_path: &Path) -> Result<Layer1Result> {
-    println!("  {} Running sui move build...", "→".cyan());
+pub fn run(move_files: &[PathBuf], contract_name: &str) -> ReconResult {
+    println!("  {} Mapping codebase...", "◆".cyan());
 
-    let sui_bin = find_sui_binary();
-    let packages = find_move_packages(project_path);
+    let mut entry_points = Vec::new();
+    let mut capabilities = Vec::new();
+    let mut math_operations = Vec::new();
+    let mut transfer_calls = Vec::new();
+    let mut total_lines = 0;
 
-    if packages.is_empty() {
-        println!("  {} No Move.toml found — skipping build", "!".yellow());
-        return Ok(Layer1Result {
-            success: true,
-            errors: vec![],
-            raw: String::new(),
-        });
+    for file_path in move_files {
+        let source = match fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        total_lines += source.lines().count();
+
+        // Extract entry points
+        let mut eps = extract_entry_points(&source, file_path);
+        entry_points.append(&mut eps);
+
+        // Extract capability types
+        let mut caps = extract_capabilities(&source);
+        capabilities.append(&mut caps);
+
+        // Extract math operations
+        let mut math = extract_math_operations(&source, file_path);
+        math_operations.append(&mut math);
+
+        // Extract transfer calls
+        let mut transfers = extract_transfer_calls(&source, file_path);
+        transfer_calls.append(&mut transfers);
     }
 
-    println!("  {} Found {} Move package(s)", "→".cyan(), packages.len());
+    // Deduplicate capabilities
+    capabilities.sort();
+    capabilities.dedup();
 
-    let mut all_errors = Vec::new();
-    let mut all_raw = String::new();
-    let mut overall_success = true;
+    println!(
+        "  {} Recon: {} entry points, {} math ops, {} transfers, {} capabilities",
+        "✓".green(),
+        entry_points.len(),
+        math_operations.len(),
+        transfer_calls.len(),
+        capabilities.len()
+    );
 
-    for package in &packages {
-        let output = Command::new(&sui_bin)
-            .args(["move", "build"])
-            .current_dir(package)
-            .output();
+    ReconResult {
+        contract_name: contract_name.to_string(),
+        move_files: move_files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+        entry_points,
+        capabilities,
+        math_operations,
+        transfer_calls,
+        total_lines,
+    }
+}
 
-        match output {
-            Err(e) => {
-                println!("  {} sui binary not found: {}", "✗".red(), e);
-                return Ok(Layer1Result {
-                    success: false,
-                    errors: vec![BuildError {
-                        file: "N/A".to_string(),
-                        line: None,
-                        message: format!("sui CLI not found: {}", e),
-                        error_type: "MissingTool".to_string(),
-                    }],
-                    raw: String::new(),
-                });
-            }
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let raw = format!("{}\n{}", stdout, stderr);
-                all_raw.push_str(&raw);
+fn extract_entry_points(source: &str, file_path: &Path) -> Vec<EntryPoint> {
+    let mut result = Vec::new();
+    let fn_re =
+        Regex::new(r"(public\s+(?:entry\s+)?fun|entry\s+fun)\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)")
+            .unwrap();
 
-                if !out.status.success() {
-                    overall_success = false;
-                    let mut errors = parse_build_errors(&raw);
-                    all_errors.append(&mut errors);
-                    println!(
-                        "  {} Build failed in {}",
-                        "!".yellow(),
-                        package.display()
-                    );
-                } else {
-                    println!(
-                        "  {} Build passed: {}",
-                        "✓".green(),
-                        package.file_name().unwrap_or_default().to_string_lossy()
-                    );
-                }
-            }
+    for (line_num, line) in source.lines().enumerate() {
+        if line.trim().starts_with("//") {
+            continue;
         }
-    }
 
-    if overall_success {
-        println!("  {} All packages built successfully", "✓".green());
-    } else {
-        println!("  {} Found {} build error(s)", "→".cyan(), all_errors.len());
-    }
+        if let Some(caps) = fn_re.captures(line) {
+            let fn_name = caps.get(2).map_or("unknown", |m| m.as_str());
+            let params = caps.get(4).map_or("", |m| m.as_str());
 
-    Ok(Layer1Result {
-        success: overall_success,
-        errors: all_errors,
-        raw: all_raw,
-    })
-}
-
-pub fn find_move_packages(dir: &Path) -> Vec<PathBuf> {
-    let mut packages = Vec::new();
-    find_packages_recursive(dir, &mut packages);
-    // If none found in subdirs, try root
-    if packages.is_empty() && dir.join("Move.toml").exists() {
-        packages.push(dir.to_path_buf());
-    }
-    packages
-}
-
-fn find_packages_recursive(dir: &Path, packages: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if !name.starts_with('.') && name != "build" && name != "target" {
-                    if path.join("Move.toml").exists() {
-                        packages.push(path.clone());
-                    }
-                    find_packages_recursive(&path, packages);
-                }
+            // Skip test functions
+            let context = get_surrounding_lines(source, line_num, 3);
+            if context.contains("#[test") {
+                continue;
             }
-        }
-    }
-}
 
-fn find_sui_binary() -> String {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    if let Some(dir) = exe_dir {
-        let bundled = dir.join("bin").join("sui");
-        if bundled.exists() {
-            return bundled.to_string_lossy().to_string();
-        }
-    }
-    "sui".to_string()
-}
-
-fn parse_build_errors(raw: &str) -> Vec<BuildError> {
-    let mut errors = Vec::new();
-
-    for line in raw.lines() {
-        if line.trim_start().starts_with("error") {
-            let message = line
-                .split(':')
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(":")
-                .trim()
-                .to_string();
-
-            let error_type = classify_error_string(&message);
-
-            errors.push(BuildError {
-                file: extract_file_from_context(raw, line),
-                line: extract_line_number(raw, line),
-                message,
-                error_type,
+            result.push(EntryPoint {
+                name: fn_name.to_string(),
+                file: file_path.to_string_lossy().to_string(),
+                line: (line_num + 1) as u32,
+                is_public: line.contains("public"),
+                params: params.to_string(),
+                has_ctx: params.contains("TxContext"),
+                has_cap: params.contains("Cap")
+                    || params.contains("Admin")
+                    || params.contains("Auth"),
             });
         }
     }
-
-    errors.dedup_by(|a, b| a.message == b.message);
-    errors
+    result
 }
 
-fn extract_file_from_context(raw: &str, error_line: &str) -> String {
-    let lines: Vec<&str> = raw.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if *line == error_line {
-            for j in i + 1..std::cmp::min(i + 5, lines.len()) {
-                let l = lines[j].trim();
-                if l.starts_with("-->") {
-                    let parts: Vec<&str> = l.trim_start_matches("-->").trim().split(':').collect();
-                    if !parts.is_empty() {
-                        return parts[0].trim().to_string();
-                    }
-                }
+fn extract_capabilities(source: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let cap_re = Regex::new(r"(?:public\s+)?struct\s+(\w*(?:Cap|Admin|Auth|Witness)\w*)\s+has")
+        .unwrap();
+
+    for line in source.lines() {
+        if line.trim().starts_with("//") {
+            continue;
+        }
+        if let Some(caps) = cap_re.captures(line) {
+            if let Some(cap_name) = caps.get(1) {
+                result.push(cap_name.as_str().to_string());
             }
         }
     }
-    "unknown".to_string()
+    result
 }
 
-fn extract_line_number(raw: &str, error_line: &str) -> Option<u32> {
-    let lines: Vec<&str> = raw.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if *line == error_line {
-            for j in i + 1..std::cmp::min(i + 5, lines.len()) {
-                let l = lines[j].trim();
-                if l.starts_with("-->") {
-                    let parts: Vec<&str> = l.trim_start_matches("-->").trim().split(':').collect();
-                    if parts.len() >= 2 {
-                        return parts[1].trim().parse().ok();
-                    }
-                }
-            }
+fn extract_math_operations(source: &str, file_path: &Path) -> Vec<MathOp> {
+    let mut result = Vec::new();
+
+    for (line_num, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") || trimmed.starts_with("*") {
+            continue;
+        }
+
+        // Detect integer types
+        let operand_type = if trimmed.contains("u256") {
+            "u256"
+        } else if trimmed.contains("u128") {
+            "u128"
+        } else if trimmed.contains("u64") {
+            "u64"
+        } else if trimmed.contains("u32") {
+            "u32"
+        } else if trimmed.contains("u8") {
+            "u8"
+        } else {
+            ""
+        };
+
+        // Detect arithmetic
+        let has_add = trimmed.contains(" + ") || trimmed.contains("+=");
+        let has_sub = trimmed.contains(" - ") || trimmed.contains("-=");
+        let has_mul = trimmed.contains(" * ") || trimmed.contains("*=");
+        let is_bit_shift = trimmed.contains(" << ") || trimmed.contains(" >> ");
+
+        if (has_add || has_sub || has_mul || is_bit_shift) && !operand_type.is_empty() {
+            let has_overflow_check = trimmed.contains("assert!")
+                || trimmed.contains("checked_")
+                || trimmed.contains("overflow")
+                || get_surrounding_lines(source, line_num, 5).contains("assert!");
+
+            result.push(MathOp {
+                file: file_path.to_string_lossy().to_string(),
+                line: (line_num + 1) as u32,
+                operation: trimmed.to_string(),
+                operand_type: operand_type.to_string(),
+                has_overflow_check,
+                is_bit_shift,
+            });
         }
     }
-    None
+    result
 }
 
-pub fn classify_error_string(msg: &str) -> String {
-    let msg_lower = msg.to_lowercase();
+fn extract_transfer_calls(source: &str, file_path: &Path) -> Vec<TransferCall> {
+    let mut result = Vec::new();
 
-    if msg_lower.contains("overflow") {
-        "IntegerOverflow".to_string()
-    } else if msg_lower.contains("signer") || msg_lower.contains("access") {
-        "AccessControl".to_string()
-    } else if msg_lower.contains("ability") || msg_lower.contains("capability") {
-        "CapabilityLeak".to_string()
-    } else if msg_lower.contains("abort") {
-        "UnhandledAbort".to_string()
-    } else if msg_lower.contains("type") || msg_lower.contains("mismatch") {
-        "TypeSafety".to_string()
-    } else if msg_lower.contains("undefined") || msg_lower.contains("unbound") {
-        "MissingDefinition".to_string()
-    } else if msg_lower.contains("unused") {
-        "DeadCode".to_string()
-    } else {
-        "Unknown".to_string()
+    for (line_num, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        let call_type = if trimmed.contains("transfer::public_transfer") {
+            "public_transfer"
+        } else if trimmed.contains("transfer::transfer") {
+            "transfer"
+        } else {
+            continue;
+        };
+
+        let context = get_surrounding_lines(source, line_num, 10);
+        let has_ownership_check = (context.contains("sender")
+            && (context.contains("assert!") || context.contains("==")))
+            || context.contains("owner");
+
+        let in_init = get_surrounding_lines(source, line_num, 20).contains("fun init(");
+
+        result.push(TransferCall {
+            file: file_path.to_string_lossy().to_string(),
+            line: (line_num + 1) as u32,
+            call_type: call_type.to_string(),
+            has_ownership_check,
+            in_init,
+        });
     }
+    result
+}
+
+fn get_surrounding_lines(source: &str, center: usize, radius: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let start = center.saturating_sub(radius);
+    let end = std::cmp::min(center + radius, lines.len());
+    lines[start..end].join("\n")
 }

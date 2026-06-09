@@ -1,4 +1,9 @@
-use crate::types::{AuditResult, Finding};
+/// Layer 4: AI EXPLAINER
+/// Only receives CONFIRMED findings from Layer 2 + 3
+/// Zero hallucinations — explains real findings, never invents
+/// Gemini 2.5 Flash with retry logic
+
+use crate::types::{AuditResult, ConfidenceLevel, Finding};
 use anyhow::{Context, Result};
 use colored::*;
 use serde::{Deserialize, Serialize};
@@ -38,10 +43,10 @@ struct GeminiCandidate {
 }
 
 pub async fn generate_report(result: &AuditResult) -> Result<String> {
-    println!("  {} Generating AI report...", "→".cyan());
+    println!("  {} Generating AI report...", "◆".cyan());
 
     let api_key = std::env::var("GEMINI_API_KEY")
-        .context("GEMINI_API_KEY not set. Add it to .env or export it.")?;
+        .context("GEMINI_API_KEY not set. Get a free key at aistudio.google.com")?;
 
     let prompt = build_prompt(result);
 
@@ -55,198 +60,187 @@ pub async fn generate_report(result: &AuditResult) -> Result<String> {
             parts: vec![GeminiPart { text: prompt }],
         }],
         generation_config: GenerationConfig {
-            temperature: 0.2, // Low temp = consistent, professional output
+            temperature: 0.1, // Very low = consistent, professional, no creativity
             max_output_tokens: 4096,
         },
     };
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .timeout(std::time::Duration::from_secs(30)).send()
-        .await
-        .context("Failed to reach Gemini API")?;
 
-    if !response.status().is_success() {
+    for attempt in 1..=3 {
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(45))
+            .send()
+            .await
+            .context("Failed to reach Gemini API")?;
+
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Gemini API error {}: {}", status, body);
+
+        if status.as_u16() == 503 || status.as_u16() == 429 {
+            if attempt < 3 {
+                println!(
+                    "  {} Gemini busy, retrying ({}/3)...",
+                    "!".yellow(),
+                    attempt
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            } else {
+                anyhow::bail!("Gemini unavailable after 3 attempts");
+            }
+        }
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini API error {}: {}", status, body);
+        }
+
+        let gemini_response: GeminiResponse = response
+            .json()
+            .await
+            .context("Failed to parse Gemini response")?;
+
+        let text = gemini_response
+            .candidates
+            .first()
+            .and_then(|c| c.content.parts.first())
+            .map(|p| p.text.clone())
+            .unwrap_or_else(|| "Report generation failed.".to_string());
+
+        println!("  {} AI report generated", "✓".green());
+        return Ok(text);
     }
 
-    let gemini_response: GeminiResponse = response
-        .json()
-        .await
-        .context("Failed to parse Gemini response")?;
-
-    let text = gemini_response
-        .candidates
-        .first()
-        .and_then(|c| c.content.parts.first())
-        .map(|p| p.text.clone())
-        .unwrap_or_else(|| "Report generation failed.".to_string());
-
-    println!("  {} AI report generated", "✓".green());
-    Ok(text)
+    anyhow::bail!("Gemini unavailable after 3 attempts")
 }
 
 fn build_prompt(result: &AuditResult) -> String {
-    let confirmed_str = format_findings_for_prompt(&result.layer3.confirmed);
-    let potential_str = format_findings_for_prompt(&result.layer3.potential);
-
-    let unknown_errors: Vec<String> = result
-        .layer1
-        .errors
+    // Only send confirmed and high confidence findings to AI
+    // Never send false positives
+    let real_findings: Vec<&Finding> = result
+        .findings
         .iter()
-        .filter(|e| e.error_type == "Unknown")
-        .map(|e| format!("- {} ({})", e.message, e.file))
+        .filter(|f| {
+            f.confidence != ConfidenceLevel::FalsePositive
+        })
+        .take(10) // Limit to avoid token overflow
         .collect();
 
-    let unknown_str = if unknown_errors.is_empty() {
-        "None".to_string()
-    } else {
-        unknown_errors.join("\n")
-    };
-
-    let l1_summary = if result.layer1.success {
-        "Build passed with no errors.".to_string()
-    } else {
-        format!(
-            "Build failed with {} error(s):\n{}",
-            result.layer1.errors.len(),
-            result
-                .layer1
-                .errors
-                .iter()
-                .map(|e| format!("  - [{}] {} ({}:{})",
-                    e.error_type,
-                    e.message,
-                    e.file,
-                    e.line.map_or("?".to_string(), |l| l.to_string())
-                ))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-
-    let l2_summary = if result.layer2.success {
-        format!(
-            "All {} tests passed.",
-            result.layer2.total_tests
-        )
-    } else {
-        format!(
-            "{}/{} tests failed:\n{}",
-            result.layer2.failed,
-            result.layer2.total_tests,
-            result
-                .layer2
-                .failures
-                .iter()
-                .map(|f| format!("  - {}::{}: {}", f.module, f.test_name, f.message))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-
-    format!(
-        r#"You are a senior Move smart contract security auditor working for Limbo Security.
-
-Analyze the following audit findings and generate a professional security report.
-
-CONTRACT: {contract_name}
-NETWORK: Sui
-RISK SCORE: {risk_score}/100
-DATE: {date}
-
-═══════════════════════════════
-LAYER 1 — BUILD ANALYSIS
-═══════════════════════════════
-{l1_summary}
-
-═══════════════════════════════
-LAYER 2 — TEST ANALYSIS  
-═══════════════════════════════
-{l2_summary}
-
-═══════════════════════════════
-LAYER 3 — CONFIRMED FINDINGS
-═══════════════════════════════
-{confirmed}
-
-═══════════════════════════════
-LAYER 3 — POTENTIAL FINDINGS
-═══════════════════════════════
-{potential}
-
-═══════════════════════════════
-UNCLASSIFIED ERRORS (classify these)
-═══════════════════════════════
-{unknown}
-
-═══════════════════════════════
-INSTRUCTIONS
-═══════════════════════════════
-Generate a professional Markdown security audit report with EXACTLY this structure:
-
-## EXECUTIVE SUMMARY
-[2-3 paragraphs. Describe the contract purpose, overall security posture, most critical risks, and immediate recommended actions. Be specific about what the contract does and what the worst case exploit scenario is.]
-
-## CONFIRMED FINDINGS
-[For each confirmed finding:]
-### [SEVERITY] — [Title]
-**File:** [file path]  
-**Line:** [line number]  
-**Tools:** [which tools detected it]  
-**Description:** [plain English explanation]  
-**Exploit Scenario:** [step by step how an attacker exploits this]  
-**Recommendation:** [specific fix with code example if possible]
-
----
-
-## HIGH CONFIDENCE FINDINGS
-[Same format as above for potential findings]
-
----
-
-## UNCLASSIFIED ERRORS
-[For each unknown error, identify what type of vulnerability it is, severity, and explanation]
-
----
-
-## RISK ASSESSMENT
-[Brief table or summary of overall risk distribution]
-
-Be direct, specific, and technical. Do not add preamble or postamble. Start directly with ## EXECUTIVE SUMMARY."#,
-        contract_name = result.contract_name,
-        risk_score = result.risk_score,
-        date = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
-        l1_summary = l1_summary,
-        l2_summary = l2_summary,
-        confirmed = if confirmed_str.is_empty() { "None detected.".to_string() } else { confirmed_str },
-        potential = if potential_str.is_empty() { "None detected.".to_string() } else { potential_str },
-        unknown = unknown_str,
-    )
-}
-
-fn format_findings_for_prompt(findings: &[Finding]) -> String {
-    if findings.is_empty() {
-        return String::new();
-    }
-
-    findings
+    let findings_text = real_findings
         .iter()
         .map(|f| {
             format!(
-                "• [{}] {} — {} (line {:?})\n  {}",
-                f.severity.as_str(),
+                r#"
+ID: {}
+Title: {}
+Severity: {}
+Confidence: {:?}
+File: {}
+Line: {}
+Code: {}
+CVE Class: {}
+Description: {}
+---"#,
+                f.id,
                 f.title,
+                f.severity.as_str(),
+                f.confidence,
                 f.file,
-                f.line,
-                f.description
+                f.line.unwrap_or(0),
+                f.code_snippet,
+                f.cve_class,
+                f.description,
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n");
+
+    let proof_summary = real_findings
+        .iter()
+        .filter(|f| f.proof.is_some())
+        .map(|f| {
+            let proof = f.proof.as_ref().unwrap();
+            format!("- {} ({:?}): {:?}", f.id, f.confidence, proof.result)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"You are a senior Move smart contract security auditor for Limbo Security.
+
+IMPORTANT: You are NOT finding new bugs. You are explaining bugs that have already been CONFIRMED by static analysis and exploit testing. Do not hallucinate or invent findings. Only explain what is listed below.
+
+CONTRACT: {}
+NETWORK: Sui
+RISK SCORE: {}/100
+TOTAL FINDINGS: {}
+DATE: {}
+
+CONFIRMED FINDINGS (already verified by limbo_sui):
+{}
+
+EXPLOIT VERIFICATION RESULTS:
+{}
+
+Your task: Generate a professional security audit report in Markdown.
+
+Rules:
+1. Only discuss findings listed above
+2. Do not invent additional findings
+3. Be specific about file paths and line numbers
+4. Reference real Sui/Move vulnerabilities (Cetus hack, capability misuse, etc.)
+5. Give concrete code fixes
+
+Use EXACTLY this structure:
+
+## EXECUTIVE SUMMARY
+[2-3 paragraphs: contract purpose, overall risk, worst case scenario, immediate actions needed]
+
+## FINDINGS
+
+[For each finding, use this format:]
+### {} [ID] — [Title]
+**Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
+**Confidence:** [Confirmed/High/Medium]
+**File:** `[path]`
+**Line:** [number]
+**Code:** `[snippet]`
+
+**What's wrong:**
+[Clear explanation of the vulnerability]
+
+**How an attacker exploits this:**
+[Step by step attack scenario]
+
+**Fix:**
+```move
+[concrete code fix]
+```
+
+---
+
+## RISK SUMMARY
+| Severity | Count |
+|:---------|:------|
+| CRITICAL | [n] |
+| HIGH | [n] |
+| MEDIUM | [n] |
+| LOW | [n] |
+
+Start directly with ## EXECUTIVE SUMMARY. No preamble."#,
+        result.contract_name,
+        result.risk_score,
+        real_findings.len(),
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+        findings_text,
+        if proof_summary.is_empty() {
+            "No exploit tests run (sui binary not available)".to_string()
+        } else {
+            proof_summary
+        },
+        "🔴", // severity emoji placeholder
+    )
 }

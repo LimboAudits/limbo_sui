@@ -1,8 +1,7 @@
 mod audit;
-mod classifier;
+mod exploit;
 mod git;
 mod layer1;
-mod layer2;
 mod layer3;
 mod layer4;
 mod report;
@@ -14,10 +13,11 @@ use dotenv::dotenv;
 
 #[derive(Parser)]
 #[command(
-    name = "limbo_sui",
-    about = "Your Move contract won't leave the same.",
-    version = "0.1.0",
-    long_about = None
+    name = "limbo",
+    about = "Smart contract security auditor for Sui Move",
+    version = "0.2.0",
+    long_about = None,
+    disable_version_flag = false,
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,36 +31,48 @@ enum Commands {
         /// GitHub URL, local path, or .move file
         target: String,
 
-        /// Output directory for limbo.report.md (default: current dir)
+        /// Output directory for limbo.report.md
         #[arg(short, long, default_value = ".")]
         output: String,
+
+        /// Skip exploit verification (faster, less accurate)
+        #[arg(long, default_value = "false")]
+        no_exploit: bool,
     },
 }
 
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    print_banner();
+    print_header();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Audit { target, output } => {
-            audit::run(target, output).await;
+        Commands::Audit {
+            target,
+            output,
+            no_exploit,
+        } => {
+            audit::run(target, output, no_exploit).await;
         }
     }
 }
 
-fn print_banner() {
+fn print_header() {
     println!();
-    println!("{}", "  ██╗     ██╗███╗   ███╗██████╗  ██████╗ ".red().bold());
-    println!("{}", "  ██║     ██║████╗ ████║██╔══██╗██╔═══██╗".red().bold());
-    println!("{}", "  ██║     ██║██╔████╔██║██████╔╝██║   ██║".red().bold());
-    println!("{}", "  ██║     ██║██║╚██╔╝██║██╔══██╗██║   ██║".red().bold());
-    println!("{}", "  ███████╗██║██║ ╚═╝ ██║██████╔╝╚██████╔╝".red().bold());
-    println!("{}", "  ╚══════╝╚═╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ".red().bold());
-    println!();
-    println!("  {} {}", "limbo_sui".white().bold(), "v0.1.0".dimmed());
-    println!("  {}", "Your Move contract won't leave the same.".dimmed());
+    println!(
+        "  {} {}",
+        "◆ limbo".bold().white(),
+        "v0.2.0".dimmed()
+    );
+    println!(
+        "  {}",
+        "Sui Move Security Auditor".dimmed()
+    );
+    println!(
+        "  {}",
+        "─────────────────────────────────────".dimmed()
+    );
     println!();
 }

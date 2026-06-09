@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use colored::*;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct ResolvedTarget {
     pub path: PathBuf,
     pub name: String,
-    pub is_temp: bool, // true if we cloned it, so we can clean up
+    pub is_temp: bool,
 }
 
 pub async fn resolve(target: &str) -> Result<ResolvedTarget> {
@@ -23,9 +24,6 @@ fn is_github_url(target: &str) -> bool {
 }
 
 async fn clone_repo(url: &str) -> Result<ResolvedTarget> {
-    println!("  {} {}", "→".cyan(), format!("Cloning {}", url).dimmed());
-
-    // Extract repo name from URL
     let name = url
         .trim_end_matches('/')
         .split('/')
@@ -34,23 +32,18 @@ async fn clone_repo(url: &str) -> Result<ResolvedTarget> {
         .trim_end_matches(".git")
         .to_string();
 
-    // Clone into a temp directory
+    println!("  {} Cloning {}...", "↓".cyan(), url.dimmed());
+
     let temp_dir = std::env::temp_dir().join(format!("limbo_{}", name));
 
-    // Remove if already exists
     if temp_dir.exists() {
         std::fs::remove_dir_all(&temp_dir)?;
     }
 
-    // Clone using git2
     git2::Repository::clone(url, &temp_dir)
         .with_context(|| format!("Failed to clone {}", url))?;
 
-    println!(
-        "  {} {}",
-        "✓".green(),
-        format!("Cloned {} successfully", name).dimmed()
-    );
+    println!("  {} Cloned {}", "✓".green(), name.white().bold());
 
     Ok(ResolvedTarget {
         path: temp_dir,
@@ -66,14 +59,12 @@ fn resolve_local(target: &str) -> Result<ResolvedTarget> {
         anyhow::bail!("Path does not exist: {}", target);
     }
 
-    // If it's a single .move file, use its parent directory
     let (resolved_path, name) = if path.is_file() {
         let name = path
             .file_stem()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        // For single files, we still need the parent for sui move build
         (path.parent().unwrap_or(Path::new(".")).to_path_buf(), name)
     } else {
         let name = path
@@ -84,12 +75,6 @@ fn resolve_local(target: &str) -> Result<ResolvedTarget> {
         (path, name)
     };
 
-    println!(
-        "  {} {}",
-        "✓".green(),
-        format!("Resolved local path: {}", resolved_path.display()).dimmed()
-    );
-
     Ok(ResolvedTarget {
         path: resolved_path,
         name,
@@ -97,26 +82,52 @@ fn resolve_local(target: &str) -> Result<ResolvedTarget> {
     })
 }
 
-/// Walk directory and collect all .move source files
 pub fn collect_move_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    collect_recursive(dir, &mut files);
-    files
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let path = e.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+
+            // Skip build artifacts and dependencies
+            !path.to_string_lossy().contains("/build/")
+                && !path.to_string_lossy().contains("/target/")
+                && !path.to_string_lossy().contains("dependencies")
+                && path.extension().map_or(false, |ext| ext == "move")
+                && !name.starts_with('.')
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
 }
 
-fn collect_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                // Skip hidden dirs and build artifacts
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if !name.starts_with('.') && name != "build" && name != "target" && name != "node_modules" && name != ".git" {
-                    collect_recursive(&path, files);
-                }
-            } else if path.extension().map_or(false, |e| e == "move") {
-                files.push(path);
-            }
-        }
+pub fn find_move_packages(dir: &Path) -> Vec<PathBuf> {
+    let mut packages = Vec::new();
+
+    // Check root first
+    if dir.join("Move.toml").exists() {
+        packages.push(dir.to_path_buf());
     }
+
+    // Walk subdirectories
+    WalkDir::new(dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path().is_dir()
+                && e.path().join("Move.toml").exists()
+                && !e.path().to_string_lossy().contains("/build/")
+                && !e.path().to_string_lossy().contains("/target/")
+        })
+        .for_each(|e| {
+            if !packages.contains(&e.path().to_path_buf()) {
+                packages.push(e.path().to_path_buf());
+            }
+        });
+
+    packages
 }
